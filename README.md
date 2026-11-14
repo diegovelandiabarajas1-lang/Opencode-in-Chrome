@@ -1,4 +1,4 @@
-﻿# Opencode in Chrome
+# Opencode in Chrome
 
 Puente que da a [OpenCode](https://opencode.ai) el control de tu Chrome, incluso cuando OpenCode corre dentro de un contenedor Docker. Expone 26 herramientas `browser_*` mediante el protocolo MCP: abrir pestañas, leer páginas, hacer clic, escribir, capturar pantalla, grabar GIF, inspeccionar consola y red.
 
