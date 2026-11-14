@@ -1,16 +1,14 @@
 ﻿{
   "name": "opencode-chrome-bridge",
   "version": "0.1.0",
-  "private": true,`n  "license": "Apache-2.0",
+  "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Puente MCP entre OpenCode (Docker) y una extension de Chrome en el host",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
     "gifenc": "^1.0.3",
     "jpeg-js": "^0.4.4",
     "ws": "8.18.0"
   }
 }
-
