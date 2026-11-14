@@ -1,7 +1,7 @@
 # Navegador (servidor MCP `navegador`)
 
 Controlas el Chrome del usuario con las herramientas `browser_*` (puente en `tools/chrome-bridge`).
-Si fallan con «La extension de Chrome no esta conectada», dilo al usuario: debe abrir Chrome con la extension y tener `start.bat` del puente corriendo.
+Si fallan con «La extension de Chrome no esta conectada», dilo al usuario: debe abrir Chrome con la extension y tener el puente corriendo (`node server.js`).
 
 Reglas de uso
 - Solo ves las pestanas del grupo naranja «OpenCode». Empieza con `browser_tabs`; si no hay, `browser_open_tab` con la URL.

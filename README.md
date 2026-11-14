@@ -17,7 +17,7 @@ Es una implementación propia e independiente, hecha con `chrome.debugger` y un 
 1. Instala dependencias y arranca el servidor en el equipo con Chrome:
    ```bash
    npm install
-   node server.js        # en Windows también: start.bat
+   node server.js
    ```
    La primera vez genera `token.txt` (secreto; no lo compartas).
 2. En Chrome abre `chrome://extensions`, activa **Modo de desarrollador** y usa **Cargar descomprimida** con la carpeta `extension/`.
