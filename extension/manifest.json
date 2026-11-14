@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "OpenCode Bridge",
+  "version": "0.1.0",
+  "description": "Permite que OpenCode controle pestanas del grupo 'OpenCode' mediante un servidor local.",
+  "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Compartir esta pestana con OpenCode" },
+  "options_page": "options.html"
+}

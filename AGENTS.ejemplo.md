@@ -1,0 +1,14 @@
+# Navegador (servidor MCP `navegador`)
+
+Controlas el Chrome del usuario con las herramientas `browser_*` (puente en `tools/chrome-bridge`).
+Si fallan con «La extension de Chrome no esta conectada», dilo al usuario: debe abrir Chrome con la extension y tener `start.bat` del puente corriendo.
+
+Reglas de uso
+- Solo ves las pestanas del grupo naranja «OpenCode». Empieza con `browser_tabs`; si no hay, `browser_open_tab` con la URL.
+- Ciclo habitual: `browser_snapshot` (mode `interactive` para actuar) -> usa los `ref_N` en `browser_click`, `browser_type`, `browser_fill` -> vuelve a hacer snapshot, las refs cambian si la pagina cambia.
+- Para leer contenido usa `browser_text`; para ver el aspecto, `browser_screenshot` (`fullPage` para toda la pagina).
+- `browser_console` y `browser_network` sirven para depurar. La red solo registra desde que la pestana se abre con `browser_open_tab` o se controla por primera vez.
+- Para grabar una demo: `browser_gif_start`, acciones, `browser_gif_stop`.
+- Guardar capturas, GIF o adjuntar archivos solo funciona con rutas bajo `/workspace/` (por defecto `/workspace/capturas/`).
+- No introduzcas contrasenas ni datos de pago en paginas; pide al usuario que lo haga. Cierra con `browser_close_tab` las pestanas que abras.
+- `browser_eval` ejecuta JavaScript en la pagina: usalo para inspeccionar, no para acciones que el usuario no pidio.
