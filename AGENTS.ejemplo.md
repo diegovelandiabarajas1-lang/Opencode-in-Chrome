@@ -1,6 +1,7 @@
 # Navegador (servidor MCP `navegador`)
 
 Controlas el Chrome del usuario con las herramientas `browser_*` (puente en `tools/chrome-bridge`).
+Con `"codemode": false` en la configuracion del servidor son herramientas directas con el prefijo del servidor: si el servidor se llama `navegador`, la herramienta es `navegador_browser_tabs`, no `browser_tabs`. En el resto de este archivo se nombran sin prefijo; anteponselo siempre.
 Si fallan con «La extension de Chrome no esta conectada», dilo al usuario: debe abrir Chrome con la extension y tener el puente corriendo (`node server.js`).
 
 Reglas de uso

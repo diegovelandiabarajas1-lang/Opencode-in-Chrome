@@ -30,12 +30,14 @@ Es una implementación propia e independiente, hecha con `chrome.debugger` y un 
          "navegador": {
            "type": "remote",
            "url": "http://host.docker.internal:8765/mcp",
-           "headers": { "Authorization": "Bearer <contenido de token.txt>" }
+           "headers": { "Authorization": "Bearer <contenido de token.txt>" },
+           "codemode": false
          }
        }
      }
    }
    ```
+   `"codemode": false` hace que OpenCode exponga las herramientas directamente, con el prefijo del servidor (`navegador_browser_tabs`). Sin esa opción, OpenCode 2.x las agrupa dentro de una herramienta `execute` y se llaman como `tools.navegador.browser_tabs(...)`; los modelos pequeños suelen equivocarse con eso y fallan con «No tool named ...».
    Si OpenCode no es de Docker, usa `http://127.0.0.1:8765/mcp`. Reinicia OpenCode para que lea el cambio y comprueba con `opencode mcp list`.
 5. Opcional: copia `AGENTS.ejemplo.md` como `AGENTS.md` en el proyecto para que el agente sepa usar las herramientas.
 
