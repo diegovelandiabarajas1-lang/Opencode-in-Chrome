@@ -62,7 +62,7 @@ Es una implementación propia e independiente, hecha con `chrome.debugger` y un 
 
 ## Seguridad
 - El agente solo ve y controla las pestañas del grupo naranja «OpenCode»; el resto del navegador queda fuera de su alcance.
-- El token es obligatorio en el MCP y en el WebSocket.
+- El token es obligatorio en el MCP (cabecera `Authorization`) y en el WebSocket, donde se envía como primer mensaje y no en la URL, para que no quede en registros ni en mensajes de error. La extensión comprueba que el servidor responde antes de conectar y espera cada vez más entre reintentos (hasta 30 s), así que no genera errores mientras el servidor está apagado.
 - El servidor escucha en `0.0.0.0` para que un contenedor pueda llegar a él. Si no usas Docker, restríngelo con `BRIDGE_HOST=127.0.0.1`.
 - `browser_eval` ejecuta JavaScript arbitrario en la página: úsalo solo con agentes y modelos en los que confíes.
 - Guardar archivos está limitado a `/workspace/`.
