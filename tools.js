@@ -209,6 +209,7 @@ export const CMD = {
   browser_dialog: "dialog", browser_wait: "wait",
   browser_gif_start: "gifStart", browser_gif_frame: "gifFrame", browser_gif_stop: "gifStop",
   browser_query: "query", browser_inspect: "inspect", browser_drop_files: "dropFiles", browser_batch: "batch",
+  browser_html: "html", browser_emulate: "emulate",
 };
 
 // ---- Ampliaciones: selectores CSS, consulta/inspeccion, arrastrar archivos, lotes ----
@@ -221,6 +222,7 @@ const byName = (n) => TOOLS.find((t) => t.name === n);
 for (const n of ["browser_text", "browser_screenshot", "browser_click", "browser_hover", "browser_type", "browser_scroll", "browser_fill", "browser_upload"]) {
   const t = byName(n);
   Object.assign(t.inputSchema.properties, sel);
+  t.inputSchema.properties.ref ??= { type: "string", description: "Referencia ref_N de browser_snapshot/find/query." };
   if (t.inputSchema.required) t.inputSchema.required = t.inputSchema.required.filter((r) => r !== "ref");
 }
 byName("browser_text").description += " Con ref o selector devuelve solo el texto de ese elemento.";
@@ -239,10 +241,51 @@ Object.assign(byName("browser_wait").inputSchema.properties, {
   gone: { type: "boolean", description: "Con text/selector: espera a que DESAPAREZCAN." },
   idle: { type: "boolean", description: "Espera a que no haya peticiones de red en curso (500 ms en calma)." },
 });
+Object.assign(byName("browser_wait").inputSchema.properties, {
+  state: { type: "string", enum: ["present", "visible", "enabled"], description: "Con selector: que exista (def.), que sea visible o que ademas este habilitado." },
+});
+byName("browser_wait").inputSchema.properties.seconds = { type: "number", description: "Tiempo maximo de espera en segundos (def. 10, max 60)." };
 byName("browser_wait").description =
-  "Espera N segundos (max 10), o hasta que se cumplan las condiciones dadas (text, selector, urlContains, gone, idle; todas a la vez).";
+  "Espera N segundos, o hasta que se cumplan las condiciones dadas (text, selector + state, urlContains, gone, idle; todas a la vez) con un limite de 'seconds' (max 60).";
+
+Object.assign(byName("browser_network").inputSchema.properties, {
+  what: { type: "string", enum: ["body", "headers"], description: "Con requestId: 'body' (def.) devuelve el cuerpo; 'headers' devuelve cabeceras, estado, tamano y tiempos." },
+  statusMin: { type: "number", description: "En el listado: solo peticiones con estado >= este valor (p. ej. 400 para errores)." },
+  failedOnly: { type: "boolean", description: "En el listado: solo peticiones fallidas o con estado >= 400." },
+  showSecrets: { type: "boolean", description: "Mostrar valores de Cookie/Authorization en las cabeceras (ocultos por defecto)." },
+});
+byName("browser_network").description =
+  "Lista peticiones de red (metodo, URL, estado, tipo, tamano y duracion en ms) con filtros. Con requestId devuelve el cuerpo de la respuesta, o con what=headers sus cabeceras y tiempos (Cookie/Authorization ocultos).";
 
 TOOLS.push(
+  {
+    name: "browser_html",
+    description: "Devuelve el HTML de la pagina completa, o de un elemento (ref o selector). Con inner=true solo el contenido interior. Para depurar estructura y atributos.",
+    inputSchema: {
+      type: "object",
+      properties: { ref: { type: "string" }, ...sel, inner: { type: "boolean" }, maxChars: { type: "number", description: "Limite de caracteres (def. 30000)." }, ...tab },
+    },
+  },
+  {
+    name: "browser_emulate",
+    description:
+      "Emula condiciones del navegador en la pestana: colorScheme (dark/light), reducedMotion, locale (idioma, p. ej. es-CO: cambia Accept-Language y navigator.language) y geolocation. Con reset=true lo quita todo. Combina con browser_viewport mobile para probar 'movil con modo oscuro'. La geolocalizacion solo la ven paginas que ya tengan permiso de ubicacion. Zona horaria no esta disponible: Chrome no la permite a las extensiones.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        colorScheme: { type: "string", enum: ["dark", "light"] },
+        reducedMotion: { type: "string", enum: ["reduce", "no-preference"] },
+        locale: { type: "string", description: "Etiqueta BCP 47, p. ej. es-CO o en-US." },
+        geolocation: {
+          type: "object",
+          properties: { latitude: { type: "number" }, longitude: { type: "number" }, accuracy: { type: "number" } },
+          required: ["latitude", "longitude"],
+        },
+        reset: { type: "boolean", description: "Quita toda la emulacion de esta herramienta." },
+        ...tab,
+      },
+    },
+  },
   {
     name: "browser_query",
     description: "Lista elementos que coinciden con un selector CSS (incluye iframes del mismo origen): ref, etiqueta, texto, si es visible y su posicion. Util para obtener refs sin recorrer todo el arbol.",
@@ -270,7 +313,7 @@ TOOLS.push(
   {
     name: "browser_batch",
     description:
-      "Ejecuta varias herramientas seguidas en una sola llamada (max 20), p. ej. click + type + key + screenshot. Se detiene en el primer error salvo stopOnError=false. Cada accion es {tool, args}; no admite batch anidado.",
+      "Ejecuta varias herramientas seguidas en una sola llamada (max 20), p. ej. click + type + key + screenshot. Se detiene en el primer error salvo stopOnError=false. Cada accion es {tool, args}; no admite batch anidado. Puedes usar los refs que devolvio una accion anterior: '{{ref}}' es el primer ref del resultado previo y '{{ref[2]}}' el tercero (p. ej. browser_find y luego browser_click con ref '{{ref}}').",
     inputSchema: {
       type: "object",
       properties: {

@@ -53,7 +53,7 @@ async function attach(tabId) {
     if (!/already attached/i.test(String(e.message))) throw e;
   }
   attached.add(tabId);
-  bufs.set(tabId, { console: [], net: new Map(), dialog: null, pending: new Set(), last: 0 });
+  bufs.set(tabId, { console: [], net: new Map(), dialog: null, pending: new Set(), last: 0, xi: new Map() });
   for (const d of ["Runtime", "Page", "Network", "Log"]) await send(tabId, d + ".enable").catch(() => {});
 }
 
@@ -70,17 +70,32 @@ chrome.debugger.onEvent.addListener(({ tabId }, method, p) => {
   else if (method === "Runtime.exceptionThrown") push("error", p.exceptionDetails.exception?.description || p.exceptionDetails.text);
   else if (method === "Log.entryAdded") push(p.entry.level, `${p.entry.text} ${p.entry.url || ""}`);
   else if (method === "Network.requestWillBeSent") {
-    b.net.set(p.requestId, { requestId: p.requestId, method: p.request.method, url: p.request.url, type: p.type });
+    b.net.set(p.requestId, { requestId: p.requestId, method: p.request.method, url: p.request.url, type: p.type, _t0: p.timestamp, _req: { ...p.request.headers, ...(b.xi.get("q" + p.requestId) || {}) } });
+    b.xi.delete("q" + p.requestId);
     if (b.net.size > 300) b.net.delete(b.net.keys().next().value);
     b.pending.add(p.requestId); b.last = Date.now();
+  } else if (method === "Network.requestWillBeSentExtraInfo" || method === "Network.responseReceivedExtraInfo") {
+    // Chrome entrega Cookie / Authorization / Set-Cookie en eventos aparte; se fusionan con las cabeceras normales.
+    const res = method === "Network.responseReceivedExtraInfo";
+    const r = b.net.get(p.requestId);
+    if (r) r[res ? "_res" : "_req"] = { ...(r[res ? "_res" : "_req"] || {}), ...p.headers };
+    else if (!res) b.xi.set("q" + p.requestId, p.headers);
   } else if (method === "Network.responseReceived") {
     const r = b.net.get(p.requestId);
-    if (r) { r.status = p.response.status; r.mime = p.response.mimeType; }
+    if (r) {
+      r.status = p.response.status; r.mime = p.response.mimeType; r._res = p.response.headers;
+      if (p.response.fromDiskCache || p.response.fromServiceWorker) r.fromCache = true;
+      const tm = p.response.timing;
+      if (tm) r._timing = { dnsMs: tm.dnsEnd >= 0 ? Math.round(tm.dnsEnd - Math.max(tm.dnsStart, 0)) : undefined, connectMs: tm.connectEnd >= 0 ? Math.round(tm.connectEnd - Math.max(tm.connectStart, 0)) : undefined, ttfbMs: Math.round(tm.receiveHeadersEnd) };
+      r._proto = p.response.protocol; r._ip = p.response.remoteIPAddress;
+    }
   } else if (method === "Network.loadingFinished") {
+    const r = b.net.get(p.requestId);
+    if (r) { r.bytes = p.encodedDataLength; r.ms = Math.round((p.timestamp - r._t0) * 1000); }
     b.pending.delete(p.requestId); b.last = Date.now();
   } else if (method === "Network.loadingFailed") {
     const r = b.net.get(p.requestId);
-    if (r) r.failed = p.errorText;
+    if (r) { r.failed = p.errorText; r.ms = Math.round((p.timestamp - r._t0) * 1000); }
     b.pending.delete(p.requestId); b.last = Date.now();
   } else if (method === "Page.javascriptDialogOpening") b.dialog = { type: p.type, message: p.message, defaultPrompt: p.defaultPrompt };
   else if (method === "Page.javascriptDialogClosed") b.dialog = null;
@@ -292,8 +307,31 @@ function pageWaitCheck(o) {
   if (o.urlContains && !location.href.includes(o.urlContains)) return false;
   let present = true;
   if (o.text) present = present && document.body.innerText.includes(o.text);
-  if (o.selector) { try { present = present && !!__find(o); } catch (e) { present = false; } }
+  if (o.selector) {
+    try {
+      const el = __find(o);
+      let ok = !!el;
+      if (ok && (o.state === "visible" || o.state === "enabled")) {
+        const r = el.getBoundingClientRect();
+        ok = r.width > 0 && r.height > 0 && el.ownerDocument.defaultView.getComputedStyle(el).visibility !== "hidden";
+        if (ok && o.state === "enabled") ok = !el.disabled && el.getAttribute("aria-disabled") !== "true";
+      }
+      present = present && ok;
+    } catch (e) { present = false; }
+  }
   return o.gone ? !present : present;
+}
+
+function pageHtml(o) {
+  let el;
+  if (o.ref || o.selector) {
+    try { el = __find(o); } catch (e) { return "ERROR: " + e.message; }
+    if (!el) return "ERROR: elemento no encontrado: " + (o.ref || o.selector);
+  } else el = document.documentElement;
+  const html = o.inner ? el.innerHTML : el.outerHTML;
+  const max = o.maxChars || 30000;
+  const pre = o.ref || o.selector ? "" : "<!doctype html>\n";
+  return html.length > max ? pre + html.slice(0, max) + `\n...[truncado: ${html.length} caracteres en total]` : pre + html;
 }
 
 function pageFill(o) {
@@ -474,6 +512,39 @@ const H = {
     if (r.error) throw new Error(r.error);
     return T(r);
   },
+  async html(a) {
+    const id = await prep(a, { focus: false });
+    const r = await callPage(id, pageHtml, a);
+    if (typeof r === "string" && r.startsWith("ERROR:")) throw new Error(r.slice(7));
+    return T(r);
+  },
+  async emulate(a) {
+    const id = await prep(a, { focus: false });
+    const done = [];
+    if (a.reset) {
+      await send(id, "Emulation.setEmulatedMedia", { features: [] }).catch(() => {});
+      await send(id, "Emulation.setGeolocationOverride", {}).catch(() => {});
+      const ua = await callPage(id, () => navigator.userAgent);
+      await send(id, "Emulation.setUserAgentOverride", { userAgent: ua, acceptLanguage: "" }).catch(() => {});
+      return T("emulacion quitada (colorScheme, reducedMotion, locale, geolocation)");
+    }
+    const features = [];
+    if (a.colorScheme) { features.push({ name: "prefers-color-scheme", value: a.colorScheme }); done.push("colorScheme=" + a.colorScheme); }
+    if (a.reducedMotion) { features.push({ name: "prefers-reduced-motion", value: a.reducedMotion }); done.push("reducedMotion=" + a.reducedMotion); }
+    if (features.length) await send(id, "Emulation.setEmulatedMedia", { features });
+    if (a.locale) {
+      // Chrome no deja a las extensiones cambiar el locale de Intl; si cambia el idioma del navegador y la cabecera Accept-Language.
+      const ua = await callPage(id, () => navigator.userAgent);
+      await send(id, "Emulation.setUserAgentOverride", { userAgent: ua, acceptLanguage: a.locale });
+      done.push("idioma(Accept-Language y navigator.language)=" + a.locale);
+    }
+    if (a.geolocation) {
+      await send(id, "Emulation.setGeolocationOverride", { latitude: a.geolocation.latitude, longitude: a.geolocation.longitude, accuracy: a.geolocation.accuracy ?? 50 });
+      done.push(`geolocation=${a.geolocation.latitude},${a.geolocation.longitude}`);
+    }
+    if (!done.length) throw new Error("Indica al menos uno de: colorScheme, reducedMotion, locale, geolocation, o reset=true");
+    return T("emulando: " + done.join(", ") + ". Recarga la pagina si ya habia leido estos valores.");
+  },
   async inspect(a) {
     const id = await prep(a, { focus: false });
     const r = await callPage(id, pageInspect, a);
@@ -601,7 +672,9 @@ const H = {
   },
   async evalJs(a) {
     const id = await prep(a, { focus: false });
-    const r = await send(id, "Runtime.evaluate", { expression: a.code, returnByValue: true, awaitPromise: true, replMode: true, userGesture: true });
+    // replMode permite 'await' al nivel superior pero no espera las promesas que se devuelven sin await; por eso solo se usa si hace falta.
+    const needsRepl = /\bawait\b/.test(a.code);
+    const r = await send(id, "Runtime.evaluate", { expression: a.code, returnByValue: true, awaitPromise: true, ...(needsRepl ? { replMode: true } : {}), userGesture: true });
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
     const v = r.result.value !== undefined ? r.result.value : r.result.description ?? r.result.type;
     const s = typeof v === "string" ? v : JSON.stringify(v);
@@ -618,12 +691,27 @@ const H = {
   async network(a) {
     const id = await prep(a, { focus: false });
     const b = bufs.get(id);
+    const SECRET = /^(cookie|set-cookie|authorization|proxy-authorization|x-api-key|x-auth-token)$/i;
+    const hide = (h) => Object.fromEntries(Object.entries(h || {}).map(([k, v]) => [k, SECRET.test(k) && !a.showSecrets ? "[oculto]" : v]));
     if (a.requestId) {
+      if (a.what === "headers") {
+        const r = b.net.get(a.requestId);
+        if (!r) throw new Error("requestId desconocido (solo se guardan las ultimas 300 peticiones)");
+        return T({
+          url: r.url, method: r.method, status: r.status, mime: r.mime, type: r.type, bytes: r.bytes, ms: r.ms, fromCache: r.fromCache, failed: r.failed,
+          protocol: r._proto, ip: r._ip, timing: r._timing,
+          requestHeaders: hide(r._req), responseHeaders: hide(r._res),
+        });
+      }
       const r = await send(id, "Network.getResponseBody", { requestId: a.requestId });
       const body = r.base64Encoded ? "[binario base64] " + r.body.slice(0, 2000) : r.body;
       return T(body.length > 30000 ? body.slice(0, 30000) + "...[truncado]" : body);
     }
-    let items = [...b.net.values()].filter((r) => !a.urlPattern || r.url.includes(a.urlPattern)).slice(-(a.limit || 50));
+    const pub = (r) => ({ requestId: r.requestId, method: r.method, url: r.url, type: r.type, status: r.status, mime: r.mime, bytes: r.bytes, ms: r.ms, fromCache: r.fromCache, failed: r.failed });
+    let items = [...b.net.values()]
+      .filter((r) => (!a.urlPattern || r.url.includes(a.urlPattern)) && (!a.statusMin || (r.status ?? 0) >= a.statusMin) && (!a.failedOnly || r.failed || (r.status ?? 0) >= 400))
+      .slice(-(a.limit || 50))
+      .map(pub);
     if (a.clear) b.net.clear();
     return T(items);
   },
@@ -649,7 +737,7 @@ const H = {
   },
   async wait(a) {
     const id = await prep(a, { focus: false });
-    const limit = Math.min(a.seconds ?? 10, 10) * 1000;
+    const limit = Math.min(Math.max(a.seconds ?? 10, 0), 60) * 1000;
     const conds = a.text || a.selector || a.urlContains || a.idle;
     if (!conds) { await sleep(limit); return T("espera completada"); }
     const end = Date.now() + limit;
