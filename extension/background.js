@@ -755,15 +755,42 @@ const H = {
 // ---------- conexion ----------
 let ws = null;
 let pingTimer = null;
+let connecting = false;
+let retryTimer = null;
+let retryMs = 3000;
+
+function scheduleRetry() {
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(connect, retryMs);
+  retryMs = Math.min(Math.round(retryMs * 1.5), 30000); // espera creciente hasta 30 s
+}
 
 async function connect() {
-  if (ws && ws.readyState <= 1) return;
-  const { host = "127.0.0.1:8765", token } = await chrome.storage.local.get(["host", "token"]);
-  if (!token) return;
-  try { ws = new WebSocket(`ws://${host}/ext?token=${encodeURIComponent(token)}`); } catch { return; }
-  const mine = ws;
-  mine.onopen = () => { clearInterval(pingTimer); pingTimer = setInterval(() => mine.readyState === 1 && mine.send('{"ping":1}'), 20000); setBadge("ON"); };
-  mine.onclose = () => { clearInterval(pingTimer); if (ws === mine) ws = null; setBadge(""); setTimeout(connect, 3000); };
+  if (connecting || (ws && ws.readyState <= 1)) return;
+  connecting = true;
+  try {
+    const { host = "127.0.0.1:8765", token } = await chrome.storage.local.get(["host", "token"]);
+    if (!token) return;
+    // Sondeo previo: si el puente no esta corriendo no se abre el WebSocket, porque Chrome
+    // registraria cada intento fallido como un error de la extension.
+    try { await fetch(`http://${host}/health`, { mode: "no-cors", signal: AbortSignal.timeout(2000) }); }
+    catch { scheduleRetry(); return; }
+    // El token NO va en la URL (apareceria en los mensajes de error): se envia como primer mensaje.
+    try { ws = new WebSocket(`ws://${host}/ext`); } catch { scheduleRetry(); return; }
+    const mine = ws;
+    wire(mine, token);
+  } finally { connecting = false; }
+}
+
+function wire(mine, token) {
+  mine.onopen = () => {
+    mine.send(JSON.stringify({ auth: token }));
+    retryMs = 3000;
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => mine.readyState === 1 && mine.send('{"ping":1}'), 20000);
+    setBadge("ON");
+  };
+  mine.onclose = () => { clearInterval(pingTimer); if (ws === mine) ws = null; setBadge(""); scheduleRetry(); };
   mine.onerror = () => {};
   mine.onmessage = async (ev) => {
     const { id, cmd, args } = JSON.parse(ev.data);
@@ -779,7 +806,7 @@ async function connect() {
 }
 const setBadge = (t) => { chrome.action.setBadgeText({ text: t }); chrome.action.setBadgeBackgroundColor({ color: "#2e7d32" }); };
 
-chrome.runtime.onMessage.addListener((m) => { if (m.type === "reconnect") { ws?.close(); ws = null; connect(); } });
+chrome.runtime.onMessage.addListener((m) => { if (m.type === "reconnect") { retryMs = 3000; ws?.close(); ws = null; connect(); } });
 chrome.action.onClicked.addListener(async (tab) => { await addToGroup(tab.id); await attach(tab.id).catch(() => {}); });
 chrome.alarms.create("keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(connect);

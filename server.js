@@ -45,18 +45,27 @@ function callExt(cmd, args) {
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
 wss.on("connection", (ws) => {
-  if (ext && ext.readyState === 1) ext.close(1000, "reemplazada");
-  ext = ws;
-  console.log("[ext] conectada");
+  // El token llega como primer mensaje {auth}, no en la URL (asi no queda en registros ni mensajes de error).
+  let ok = false;
+  const timer = setTimeout(() => { if (!ok) ws.close(1008, "sin autenticacion"); }, 3000);
   ws.on("message", (raw) => {
     let m; try { m = JSON.parse(raw); } catch { return; }
+    if (!ok) {
+      if (typeof m.auth === "string" && safeEq(m.auth, TOKEN)) {
+        ok = true; clearTimeout(timer);
+        if (ext && ext.readyState === 1) ext.close(1000, "reemplazada");
+        ext = ws;
+        console.log("[ext] conectada");
+      } else ws.close(1008, "token invalido");
+      return;
+    }
     if (m.ping) return;
     const p = pending.get(m.id);
     if (!p) return;
     clearTimeout(p.timer); pending.delete(m.id);
     m.error ? p.reject(new Error(m.error)) : p.resolve(m.result);
   });
-  ws.on("close", () => { if (ext === ws) ext = null; console.log("[ext] desconectada"); });
+  ws.on("close", () => { clearTimeout(timer); if (ext === ws) { ext = null; console.log("[ext] desconectada"); } });
 });
 
 // ---- utilidades ----
@@ -236,7 +245,7 @@ const server = http.createServer(async (req, res) => {
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url, "http://x");
-  if (url.pathname !== "/ext" || !authed(req, url)) { socket.destroy(); return; }
+  if (url.pathname !== "/ext") { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
 });
 
