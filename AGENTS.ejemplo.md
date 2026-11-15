@@ -12,3 +12,4 @@ Reglas de uso
 - Guardar capturas, GIF o adjuntar archivos solo funciona con rutas bajo `/workspace/` (por defecto `/workspace/capturas/`).
 - No introduzcas contrasenas ni datos de pago en paginas; pide al usuario que lo haga. Cierra con `browser_close_tab` las pestanas que abras.
 - `browser_eval` ejecuta JavaScript en la pagina: usalo para inspeccionar, no para acciones que el usuario no pidio.
+- Para acelerar: usa `browser_batch` para encadenar acciones (clic + escribir + tecla + captura) en una sola llamada. Con `selector` (CSS) puedes actuar sin hacer snapshot antes; `browser_query` e `browser_inspect` ayudan cuando un elemento no responde. `browser_wait` admite `selector`, `idle` (red en calma) y `gone`.

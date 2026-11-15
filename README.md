@@ -1,6 +1,6 @@
 # Opencode in Chrome
 
-Puente que da a [OpenCode](https://opencode.ai) el control de tu Chrome, incluso cuando OpenCode corre dentro de un contenedor Docker. Expone 26 herramientas `browser_*` mediante el protocolo MCP: abrir pestañas, leer páginas, hacer clic, escribir, capturar pantalla, grabar GIF, inspeccionar consola y red.
+Puente que da a [OpenCode](https://opencode.ai) el control de tu Chrome, incluso cuando OpenCode corre dentro de un contenedor Docker. Expone 30 herramientas `browser_*` mediante el protocolo MCP: abrir pestañas, leer páginas, hacer clic, escribir, capturar pantalla, grabar GIF, inspeccionar consola y red, y encadenar acciones en una sola llamada.
 
 ```
 OpenCode (Docker) ──MCP/HTTP──▶ server.js (host :8765) ──WebSocket──▶ extensión de Chrome ──CDP──▶ pestañas
@@ -43,12 +43,17 @@ Es una implementación propia e independiente, hecha con `chrome.debugger` y un 
 | Grupo | Herramientas |
 |---|---|
 | Pestañas | `browser_tabs`, `browser_open_tab`, `browser_close_tab`, `browser_focus_tab`, `browser_goto` |
-| Leer | `browser_snapshot` (referencias `ref_N`), `browser_find`, `browser_text`, `browser_screenshot` |
-| Actuar | `browser_click`, `browser_hover`, `browser_drag`, `browser_type`, `browser_key`, `browser_scroll`, `browser_fill`, `browser_upload` |
+| Leer | `browser_snapshot` (referencias `ref_N`), `browser_find`, `browser_query`, `browser_inspect`, `browser_text`, `browser_screenshot` |
+| Actuar | `browser_click`, `browser_hover`, `browser_drag`, `browser_type`, `browser_key`, `browser_scroll`, `browser_fill`, `browser_upload`, `browser_drop_files` |
 | Depurar | `browser_eval`, `browser_console`, `browser_network`, `browser_viewport`, `browser_dialog`, `browser_wait` |
 | GIF | `browser_gif_start`, `browser_gif_frame`, `browser_gif_stop` |
+| Lotes | `browser_batch` (hasta 20 acciones en una llamada; se detiene en el primer error) |
 
-`browser_screenshot` admite `fullPage`, `format` (jpeg/png), `save` e `inline`. Las rutas de `save`, de los GIF y de `browser_upload` deben estar bajo `/workspace/`, que se traduce a la carpeta del equipo indicada por `WORKSPACE_HOST` (por defecto, dos niveles sobre este directorio).
+- **Elementos por `ref` o por `selector`:** `click`, `hover`, `type`, `fill`, `scroll`, `upload`, `text` y `screenshot` aceptan una referencia de `browser_snapshot` o un selector CSS (con `index` para elegir coincidencia). Los selectores y el snapshot entran en iframes del mismo origen.
+- **`browser_find`:** todas las palabras deben aparecer, sin distinguir mayúsculas ni acentos; admite `role` y `limit`.
+- **`browser_wait`:** por tiempo, texto, selector, parte de la URL, desaparición (`gone`) o red en calma (`idle`).
+- **`browser_screenshot`:** `fullPage`, un solo elemento (`ref`/`selector`), `region`, `format` (jpeg/png), `save` e `inline`.
+- **Rutas:** las de `save`, de los GIF y de `browser_upload`/`browser_drop_files` deben estar bajo `/workspace/`, que se traduce a la carpeta del equipo indicada por `WORKSPACE_HOST` (por defecto, dos niveles sobre este directorio).
 
 ## Seguridad
 - El agente solo ve y controla las pestañas del grupo naranja «OpenCode»; el resto del navegador queda fuera de su alcance.
@@ -66,7 +71,8 @@ Es una implementación propia e independiente, hecha con `chrome.debugger` y un 
 | `BRIDGE_DEBUG` | — | Registra cada petición HTTP |
 
 ## Limitaciones conocidas
-- `browser_snapshot` no recorre iframes de otro origen.
+- Los iframes de otro origen aparecen en el snapshot, pero su contenido no es accesible.
+- No hay búsqueda de elementos en lenguaje natural: `browser_find` y `browser_query` trabajan con texto, roles y selectores.
 - La red y la consola se registran desde que la pestaña se abre con `browser_open_tab` o se controla por primera vez.
 - Cada cambio en `extension/` exige recargar la extensión en `chrome://extensions`.
 

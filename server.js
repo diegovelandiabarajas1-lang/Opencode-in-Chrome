@@ -101,8 +101,23 @@ function encodeGif(frames, delay) {
 async function callTool(name, args = {}) {
   const cmd = CMD[name];
   if (!cmd) return { isError: true, content: [{ type: "text", text: `Herramienta desconocida: ${name}` }] };
-  if (name === "browser_upload") args = { ...args, paths: (args.paths || []).map(toHostPath) };
+  if (name === "browser_upload" || name === "browser_drop_files") args = { ...args, paths: (args.paths || []).map(toHostPath) };
   try {
+    if (name === "browser_batch") {
+      const acts = Array.isArray(args.actions) ? args.actions.slice(0, 20) : [];
+      if (!acts.length) throw new Error("actions esta vacio");
+      const content = [];
+      let failed = false;
+      for (let i = 0; i < acts.length; i++) {
+        const a = acts[i] || {};
+        if (a.tool === "browser_batch") throw new Error("browser_batch no puede anidarse");
+        const r = await callTool(a.tool, a.args || {});
+        content.push({ type: "text", text: `#${i + 1} ${a.tool}${r.isError ? " [ERROR]" : ""}` });
+        content.push(...r.content);
+        if (r.isError && args.stopOnError !== false) { failed = true; content.push({ type: "text", text: `Lote detenido en la accion ${i + 1} de ${acts.length}` }); break; }
+      }
+      return { content, isError: failed };
+    }
     if (name === "browser_gif_stop") {
       const r = await callExt(cmd, { discard: !!args.discard });
       if (args.discard) return { content: [{ type: "text", text: "Grabacion descartada" }] };
@@ -167,7 +182,7 @@ const server = http.createServer(async (req, res) => {
   const batch = Array.isArray(msg);
   const out = (await Promise.all((batch ? msg : [msg]).map(rpc))).filter(Boolean);
   if (!out.length) { res.writeHead(202).end(); return; }
-  res.writeHead(200, { "content-type": "application/json" });
+  res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(batch ? out : out[0]));
 });
 

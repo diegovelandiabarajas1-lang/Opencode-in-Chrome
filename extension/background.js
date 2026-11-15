@@ -53,7 +53,7 @@ async function attach(tabId) {
     if (!/already attached/i.test(String(e.message))) throw e;
   }
   attached.add(tabId);
-  bufs.set(tabId, { console: [], net: new Map(), dialog: null });
+  bufs.set(tabId, { console: [], net: new Map(), dialog: null, pending: new Set(), last: 0 });
   for (const d of ["Runtime", "Page", "Network", "Log"]) await send(tabId, d + ".enable").catch(() => {});
 }
 
@@ -72,14 +72,19 @@ chrome.debugger.onEvent.addListener(({ tabId }, method, p) => {
   else if (method === "Network.requestWillBeSent") {
     b.net.set(p.requestId, { requestId: p.requestId, method: p.request.method, url: p.request.url, type: p.type });
     if (b.net.size > 300) b.net.delete(b.net.keys().next().value);
+    b.pending.add(p.requestId); b.last = Date.now();
   } else if (method === "Network.responseReceived") {
     const r = b.net.get(p.requestId);
     if (r) { r.status = p.response.status; r.mime = p.response.mimeType; }
+  } else if (method === "Network.loadingFinished") {
+    b.pending.delete(p.requestId); b.last = Date.now();
   } else if (method === "Network.loadingFailed") {
     const r = b.net.get(p.requestId);
     if (r) r.failed = p.errorText;
+    b.pending.delete(p.requestId); b.last = Date.now();
   } else if (method === "Page.javascriptDialogOpening") b.dialog = { type: p.type, message: p.message, defaultPrompt: p.defaultPrompt };
   else if (method === "Page.javascriptDialogClosed") b.dialog = null;
+  else if (method === "Page.domContentEventFired") b.dom = Date.now();
 });
 
 // Prepara una pestana para actuar: la trae al frente (los eventos de raton/teclado lo necesitan) y adjunta el depurador.
@@ -95,7 +100,29 @@ async function evalIn(tabId, expression, extra = {}) {
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
   return r.result;
 }
-const callPage = async (tabId, fn, arg) => (await evalIn(tabId, `(${fn.toString()})(${JSON.stringify(arg ?? null)})`)).value;
+// Utilidades compartidas que se inyectan delante de cada funcion de pagina:
+// __find resuelve un elemento por ref o selector CSS (cruza iframes del mismo origen); __abs da su rect en el viewport superior.
+const PRELUDE = `
+const __G = (window.__ocb = window.__ocb || { n: 0, ids: new WeakMap(), els: new Map() });
+const __idOf = (el) => { let i = __G.ids.get(el); if (!i) { i = "ref_" + ++__G.n; __G.ids.set(el, i); __G.els.set(i, new WeakRef(el)); } return i; };
+const __docs = () => { const out = [document]; const walk = (d) => { for (const f of d.querySelectorAll("iframe,frame")) { try { if (f.contentDocument) { out.push(f.contentDocument); walk(f.contentDocument); } } catch (e) {} } }; walk(document); return out; };
+const __find = (o) => {
+  if (o.ref) { const el = __G.els.get(o.ref)?.deref(); return el && el.isConnected ? el : null; }
+  if (o.selector) {
+    const all = [];
+    for (const d of __docs()) { try { all.push(...d.querySelectorAll(o.selector)); } catch (e) { throw new Error("Selector CSS invalido: " + o.selector); } }
+    return all[o.index || 0] || null;
+  }
+  return null;
+};
+const __abs = (el) => {
+  const r = el.getBoundingClientRect(); let x = r.x, y = r.y; let w = el.ownerDocument.defaultView;
+  while (w && w !== w.top) { const f = w.frameElement; if (!f) break; const fr = f.getBoundingClientRect(); x += fr.x + f.clientLeft; y += fr.y + f.clientTop; w = w.parent; }
+  return { x, y, width: r.width, height: r.height };
+};
+`;
+const callPage = async (tabId, fn, arg) =>
+  (await evalIn(tabId, `(function(){ ${PRELUDE}\nreturn (${fn.toString()})(${JSON.stringify(arg ?? null)}); })()`)).value;
 
 // ---------- funciones que corren DENTRO de la pagina ----------
 function pageSnapshot(o) {
@@ -145,7 +172,7 @@ function pageSnapshot(o) {
     return ti !== null && Number(ti) >= 0;
   };
   const visible = (el) => {
-    const s = getComputedStyle(el);
+    const s = (el.ownerDocument.defaultView || window).getComputedStyle(el);
     if (s.display === "none" || s.visibility === "hidden" || el.getAttribute("aria-hidden") === "true") return false;
     return true;
   };
@@ -162,6 +189,14 @@ function pageSnapshot(o) {
     const t = node.tagName.toLowerCase();
     if (["script", "style", "noscript", "template", "svg", "head"].includes(t)) return;
     if (!visible(node)) return;
+    if (t === "iframe" || t === "frame") {
+      let inner = null;
+      try { inner = node.contentDocument; } catch (e) { /* otro origen */ }
+      const nm = name(node);
+      out.push("  ".repeat(depth) + "iframe" + (nm ? ' "' + nm.replace(/"/g, "'") + '"' : "") + " [" + idOf(node) + "]" + (inner ? "" : " (otro origen: contenido no accesible)"));
+      if (inner && inner.body) walk(inner.body, depth + 1);
+      return;
+    }
     let d = depth;
     const isI = interactive(node);
     const r = role(node);
@@ -196,25 +231,75 @@ function pageSnapshot(o) {
 }
 
 function pageRefRect(o) {
-  const el = window.__ocb?.els.get(o.ref)?.deref();
-  if (!el || !el.isConnected) return { error: "ref desconocida o ya no esta en la pagina: " + o.ref + " (vuelve a hacer browser_snapshot)" };
+  let el;
+  try { el = __find(o); } catch (e) { return { error: e.message }; }
+  if (!el) return { error: "elemento no encontrado: " + (o.ref || o.selector) + " (vuelve a hacer browser_snapshot)" };
   el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-  const r = el.getBoundingClientRect();
+  const r = __abs(el);
   if (!r.width || !r.height) return { error: "El elemento no tiene tamano visible" };
-  return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  return { x: r.x + r.width / 2, y: r.y + r.height / 2, left: r.x, top: r.y, width: r.width, height: r.height };
 }
 
 function pageFocus(o) {
-  const el = window.__ocb?.els.get(o.ref)?.deref();
-  if (!el || !el.isConnected) return "ERROR: ref desconocida: " + o.ref;
+  let el;
+  try { el = __find(o); } catch (e) { return "ERROR: " + e.message; }
+  if (!el) return "ERROR: elemento no encontrado: " + (o.ref || o.selector);
   el.scrollIntoView({ block: "center", behavior: "instant" });
   el.focus();
   return "ok";
 }
 
+function pageQuery(o) {
+  const res = [];
+  const lim = o.limit || 20;
+  for (const d of __docs()) {
+    let list;
+    try { list = d.querySelectorAll(o.selector); } catch (e) { return { error: "Selector CSS invalido: " + o.selector }; }
+    for (const el of list) {
+      const r = __abs(el);
+      const vis = r.width > 0 && r.height > 0 && el.ownerDocument.defaultView.getComputedStyle(el).visibility !== "hidden";
+      if (o.visibleOnly && !vis) continue;
+      res.push({ ref: __idOf(el), tag: el.tagName.toLowerCase(), visible: vis, rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+        text: (el.innerText || el.value || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 80) });
+      if (res.length >= lim) return { count: res.length, items: res, nota: "limite alcanzado" };
+    }
+  }
+  return { count: res.length, items: res };
+}
+
+function pageInspect(o) {
+  let el;
+  try { el = __find(o); } catch (e) { return { error: e.message }; }
+  if (!el) return { error: "elemento no encontrado: " + (o.ref || o.selector) };
+  const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+  const r = __abs(el);
+  const pw = el.type === "password";
+  const attrs = {};
+  for (const a of el.attributes) if (!(pw && a.name === "value")) attrs[a.name] = a.value.slice(0, 200);
+  return {
+    ref: __idOf(el), tag: el.tagName.toLowerCase(), attrs,
+    text: (el.innerText || "").replace(/\s+/g, " ").trim().slice(0, 300),
+    value: "value" in el && !pw ? String(el.value).slice(0, 200) : undefined,
+    checked: el.checked, disabled: el.disabled,
+    rect: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
+    inViewport: r.width > 0 && r.height > 0 && r.y < innerHeight && r.y + r.height > 0 && r.x < innerWidth && r.x + r.width > 0,
+    style: { display: cs.display, visibility: cs.visibility, position: cs.position, opacity: cs.opacity, color: cs.color, backgroundColor: cs.backgroundColor, fontSize: cs.fontSize, pointerEvents: cs.pointerEvents, zIndex: cs.zIndex },
+    html: pw ? undefined : el.outerHTML.slice(0, 600),
+  };
+}
+
+function pageWaitCheck(o) {
+  if (o.urlContains && !location.href.includes(o.urlContains)) return false;
+  let present = true;
+  if (o.text) present = present && document.body.innerText.includes(o.text);
+  if (o.selector) { try { present = present && !!__find(o); } catch (e) { present = false; } }
+  return o.gone ? !present : present;
+}
+
 function pageFill(o) {
-  const el = window.__ocb?.els.get(o.ref)?.deref();
-  if (!el || !el.isConnected) return "ERROR: ref desconocida: " + o.ref;
+  let el;
+  try { el = __find(o); } catch (e) { return "ERROR: " + e.message; }
+  if (!el) return "ERROR: elemento no encontrado: " + (o.ref || o.selector);
   el.scrollIntoView({ block: "center", behavior: "instant" });
   const ev = (n) => el.dispatchEvent(new Event(n, { bubbles: true }));
   const t = el.tagName.toLowerCase();
@@ -235,13 +320,18 @@ function pageFill(o) {
 }
 
 function pageText(o) {
-  const el = document.querySelector("article, main") || document.body;
+  let el;
+  if (o.ref || o.selector) {
+    try { el = __find(o); } catch (e) { return "ERROR: " + e.message; }
+    if (!el) return "ERROR: elemento no encontrado: " + (o.ref || o.selector);
+  } else el = document.querySelector("article, main") || document.body;
   const s = `URL: ${location.href}\nTitulo: ${document.title}\n\n` + el.innerText;
   const max = o.maxChars || 50000;
   return s.length > max ? s.slice(0, max) + "\n...[truncado]" : s;
 }
 
-const pageMetrics = () => ({ w: innerWidth, h: innerHeight });
+// sx/sy: desplazamiento actual. El recorte de Page.captureScreenshot usa coordenadas del DOCUMENTO, no de la ventana.
+const pageMetrics = () => ({ w: innerWidth, h: innerHeight, sx: Math.round(window.scrollX), sy: Math.round(window.scrollY) });
 const pageHasText = (o) => document.body.innerText.includes(o.text);
 
 // ---------- teclado / raton ----------
@@ -278,22 +368,29 @@ const BTN = { left: ["left", 1], right: ["right", 2], middle: ["middle", 4] };
 const modMask = (s) => (s || "").split("+").reduce((m, p) => m | (MODS[p.trim().toLowerCase()] ?? 0), 0);
 
 async function target(tabId, a) {
-  if (a.ref) {
-    const r = await callPage(tabId, pageRefRect, { ref: a.ref });
+  if (a.ref || a.selector) {
+    const r = await callPage(tabId, pageRefRect, { ref: a.ref, selector: a.selector, index: a.index });
     if (r.error) throw new Error(r.error);
     return r;
   }
   if (typeof a.x === "number" && typeof a.y === "number") return { x: a.x, y: a.y };
-  throw new Error("Indica ref o coordenadas x,y");
+  throw new Error("Indica ref, selector o coordenadas x,y");
 }
 const mouse = (tabId, type, x, y, extra = {}) => send(tabId, "Input.dispatchMouseEvent", { type, x, y, ...extra });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Espera a que la pestana cargue: estado "complete", o 3 s despues del DOMContentLoaded
+// (paginas con rastreadores o conexiones abiertas, como Netflix, tardan 20 s en llegar a "complete").
 function waitLoad(tabId, ms = 20000) {
   return new Promise((resolve) => {
-    const done = () => { clearTimeout(t); chrome.tabs.onUpdated.removeListener(l); resolve(); };
+    const start = Date.now();
+    const done = () => { clearTimeout(t); clearInterval(iv); chrome.tabs.onUpdated.removeListener(l); resolve(); };
     const l = (id, info) => { if (id === tabId && info.status === "complete") done(); };
     const t = setTimeout(done, ms);
+    const iv = setInterval(() => {
+      const b = bufs.get(tabId);
+      if (b && b.dom > start && Date.now() - b.dom > 3000) done();
+    }, 250);
     chrome.tabs.onUpdated.addListener(l);
   });
 }
@@ -307,8 +404,8 @@ async function grabFrame() {
   if (!rec || rec.busy || rec.frames.length >= rec.max) return;
   rec.busy = true;
   try {
-    const { w, h } = await callPage(rec.tabId, pageMetrics);
-    const r = await send(rec.tabId, "Page.captureScreenshot", { format: "jpeg", quality: 60, clip: { x: 0, y: 0, width: w, height: h, scale: rec.scale } });
+    const { w, h, sx, sy } = await callPage(rec.tabId, pageMetrics);
+    const r = await send(rec.tabId, "Page.captureScreenshot", { format: "jpeg", quality: 60, clip: { x: sx, y: sy, width: w, height: h, scale: rec.scale } });
     rec.frames.push(r.data);
   } catch { /* la pestana pudo cerrarse */ }
   rec.busy = false;
@@ -355,19 +452,55 @@ const H = {
   async snapshot(a) { const id = await prep(a, { focus: false }); return T(await callPage(id, pageSnapshot, a)); },
   async find(a) {
     const id = await prep(a, { focus: false });
-    const q = String(a.query).toLowerCase();
-    const lines = (await callPage(id, pageSnapshot, { mode: "all", maxChars: 400000 })).split("\n").filter((l) => /\[ref_\d+\]/.test(l) && l.toLowerCase().includes(q));
-    return T(lines.slice(0, 20).map((l) => l.trim()).join("\n") || "Sin coincidencias");
+    // Sin distinguir mayusculas ni acentos: «iniciar sesion» encuentra «Iniciar sesión».
+    const norm = (s) => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+    const q = norm(a.query).trim();
+    const terms = q.split(/\s+/).filter(Boolean);
+    const role = a.role ? norm(a.role) : null;
+    const scored = (await callPage(id, pageSnapshot, { mode: "all", maxChars: 400000 }))
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /\[ref_\d+\]/.test(l))
+      .map((l) => ({ l, low: norm(l) }))
+      .filter(({ low }) => terms.every((t) => low.includes(t)) && (!role || low.startsWith(role + " ") || low.startsWith(role + "[")))
+      .map(({ l, low }) => ({ l, s: low.includes('"' + q + '"') ? 3 : low.includes('"' + q) ? 2 : 1 }))
+      .sort((x, y) => y.s - x.s)
+      .slice(0, a.limit || 20);
+    return T(scored.map((x) => x.l).join("\n") || "Sin coincidencias");
   },
-  async text(a) { const id = await prep(a, { focus: false }); return T(await callPage(id, pageText, a)); },
+  async query(a) {
+    const id = await prep(a, { focus: false });
+    const r = await callPage(id, pageQuery, a);
+    if (r.error) throw new Error(r.error);
+    return T(r);
+  },
+  async inspect(a) {
+    const id = await prep(a, { focus: false });
+    const r = await callPage(id, pageInspect, a);
+    if (r.error) throw new Error(r.error);
+    return T(r);
+  },
+  async text(a) {
+    const id = await prep(a, { focus: false });
+    const r = await callPage(id, pageText, a);
+    if (typeof r === "string" && r.startsWith("ERROR:")) throw new Error(r.slice(7));
+    return T(r);
+  },
   async screenshot(a) {
     const id = await prep(a);
-    const { w, h } = await callPage(id, pageMetrics);
-    let clip, beyond = false, note = `Viewport ${w}x${h} (coordenadas en pixeles CSS)`;
-    if (a.region) {
+    let m = await callPage(id, pageMetrics);
+    let clip, beyond = false, note = `Viewport ${m.w}x${m.h} (coordenadas en pixeles CSS)`;
+    if (a.ref || a.selector) {
+      const e = await callPage(id, pageRefRect, { ref: a.ref, selector: a.selector, index: a.index });
+      if (e.error) throw new Error(e.error);
+      m = await callPage(id, pageMetrics); // el scroll cambio al llevar el elemento a la vista
+      clip = { x: e.left + m.sx, y: e.top + m.sy, width: e.width, height: e.height, scale: Math.min(3, 1400 / e.width) };
+      beyond = true;
+      note = `Elemento ${Math.round(e.width)}x${Math.round(e.height)} en (${Math.round(e.left)}, ${Math.round(e.top)})`;
+    } else if (a.region) {
       const [x0, y0, x1, y1] = a.region;
       const width = Math.max(1, x1 - x0), height = Math.max(1, y1 - y0);
-      clip = { x: x0, y: y0, width, height, scale: Math.min(3, 1400 / width) };
+      clip = { x: x0 + m.sx, y: y0 + m.sy, width, height, scale: Math.min(3, 1400 / width) };
     } else if (a.fullPage) {
       const m = await send(id, "Page.getLayoutMetrics");
       const cs = m.cssContentSize || m.contentSize;
@@ -375,7 +508,7 @@ const H = {
       clip = { x: 0, y: 0, width, height, scale: a.scale || 1 };
       beyond = true;
       note = `Pagina completa ${width}x${height}` + (cs.height > 16000 ? " (recortada a 16000 px de alto)" : "");
-    } else clip = { x: 0, y: 0, width: w, height: h, scale: a.scale || 1 };
+    } else clip = { x: m.sx, y: m.sy, width: m.w, height: m.h, scale: a.scale || 1 };
     const png = a.format === "png";
     const r = await send(id, "Page.captureScreenshot", { format: png ? "png" : "jpeg", ...(png ? {} : { quality: 72 }), clip, captureBeyondViewport: beyond });
     return { image: { data: r.data, mime: png ? "image/png" : "image/jpeg" }, text: note };
@@ -421,7 +554,7 @@ const H = {
   },
   async type(a) {
     const id = await prep(a);
-    if (a.ref) { const r = await callPage(id, pageFocus, { ref: a.ref }); if (r !== "ok") throw new Error(r); }
+    if (a.ref || a.selector) { const r = await callPage(id, pageFocus, a); if (r !== "ok") throw new Error(r); }
     await send(id, "Input.insertText", { text: a.text });
     return T(`escrito ${a.text.length} caracteres`);
   },
@@ -433,7 +566,7 @@ const H = {
   },
   async scroll(a) {
     const id = await prep(a);
-    if (a.ref) { const r = await callPage(id, pageRefRect, { ref: a.ref }); if (r.error) throw new Error(r.error); return T("elemento en vista"); }
+    if (a.ref || a.selector) { const r = await callPage(id, pageRefRect, a); if (r.error) throw new Error(r.error); return T("elemento en vista"); }
     const m = await callPage(id, pageMetrics);
     const x = a.x ?? m.w / 2, y = a.y ?? m.h / 2;
     const px = (a.amount ?? 3) * 100;
@@ -450,10 +583,21 @@ const H = {
   },
   async upload(a) {
     const id = await prep(a, { focus: false });
-    const o = await evalIn(id, `window.__ocb?.els.get(${JSON.stringify(a.ref)})?.deref()`, { returnByValue: false });
-    if (!o.objectId) throw new Error("ref desconocida: " + a.ref);
+    const q = JSON.stringify({ ref: a.ref, selector: a.selector, index: a.index });
+    const o = await evalIn(id, `(function(){ ${PRELUDE}\nreturn __find(${q}); })()`, { returnByValue: false });
+    if (!o.objectId) throw new Error("elemento no encontrado: " + (a.ref || a.selector));
     await send(id, "DOM.setFileInputFiles", { files: a.paths, objectId: o.objectId });
     return T(`${a.paths.length} archivo(s) adjuntados`);
+  },
+  // Suelta archivos sobre una zona de arrastre (no solo <input type=file>), con eventos de arrastre reales.
+  async dropFiles(a) {
+    const id = await prep(a);
+    const { x, y } = await target(id, a);
+    const data = { items: [], files: a.paths, dragOperationsMask: 1 };
+    await send(id, "Input.dispatchDragEvent", { type: "dragEnter", x, y, data });
+    await send(id, "Input.dispatchDragEvent", { type: "dragOver", x, y, data });
+    await send(id, "Input.dispatchDragEvent", { type: "drop", x, y, data });
+    return T(`${a.paths.length} archivo(s) soltados en (${Math.round(x)}, ${Math.round(y)})`);
   },
   async evalJs(a) {
     const id = await prep(a, { focus: false });
@@ -506,13 +650,17 @@ const H = {
   async wait(a) {
     const id = await prep(a, { focus: false });
     const limit = Math.min(a.seconds ?? 10, 10) * 1000;
-    if (!a.text) { await sleep(limit); return T("espera completada"); }
+    const conds = a.text || a.selector || a.urlContains || a.idle;
+    if (!conds) { await sleep(limit); return T("espera completada"); }
     const end = Date.now() + limit;
+    const b = bufs.get(id);
     while (Date.now() < end) {
-      if (await callPage(id, pageHasText, { text: a.text })) return T("texto encontrado");
+      const pageOk = a.text || a.selector || a.urlContains ? await callPage(id, pageWaitCheck, a) : true;
+      const idleOk = !a.idle || (b.pending.size === 0 && Date.now() - b.last > 500);
+      if (pageOk && idleOk) return T("condicion cumplida");
       await sleep(250);
     }
-    return T("el texto no aparecio");
+    return T("la condicion no se cumplio a tiempo" + (a.idle && b.pending.size > 0 ? ` (${b.pending.size} peticiones siguen en curso)` : ""));
   },
 };
 

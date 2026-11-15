@@ -208,4 +208,80 @@ export const CMD = {
   browser_eval: "evalJs", browser_console: "console", browser_network: "network", browser_viewport: "viewport",
   browser_dialog: "dialog", browser_wait: "wait",
   browser_gif_start: "gifStart", browser_gif_frame: "gifFrame", browser_gif_stop: "gifStop",
+  browser_query: "query", browser_inspect: "inspect", browser_drop_files: "dropFiles", browser_batch: "batch",
 };
+
+// ---- Ampliaciones: selectores CSS, consulta/inspeccion, arrastrar archivos, lotes ----
+const sel = {
+  selector: { type: "string", description: "Selector CSS, alternativa a ref (tambien busca dentro de iframes del mismo origen)." },
+  index: { type: "number", description: "Con selector: cual coincidencia usar (0 = la primera)." },
+};
+const byName = (n) => TOOLS.find((t) => t.name === n);
+
+for (const n of ["browser_text", "browser_screenshot", "browser_click", "browser_hover", "browser_type", "browser_scroll", "browser_fill", "browser_upload"]) {
+  const t = byName(n);
+  Object.assign(t.inputSchema.properties, sel);
+  if (t.inputSchema.required) t.inputSchema.required = t.inputSchema.required.filter((r) => r !== "ref");
+}
+byName("browser_text").description += " Con ref o selector devuelve solo el texto de ese elemento.";
+byName("browser_screenshot").description += " Con ref o selector captura solo ese elemento.";
+
+Object.assign(byName("browser_find").inputSchema.properties, {
+  role: { type: "string", description: "Filtra por rol (button, link, textbox, heading...)." },
+  limit: { type: "number", description: "Maximo de resultados (def. 20)." },
+});
+byName("browser_find").description =
+  "Busca en el arbol de la pagina: todas las palabras de la consulta deben aparecer en la linea (rol, nombre o valor); los nombres que coinciden exactamente salen primero. Admite filtro por rol.";
+
+Object.assign(byName("browser_wait").inputSchema.properties, {
+  selector: { type: "string", description: "Espera a que exista este selector CSS." },
+  urlContains: { type: "string", description: "Espera a que la URL contenga este texto." },
+  gone: { type: "boolean", description: "Con text/selector: espera a que DESAPAREZCAN." },
+  idle: { type: "boolean", description: "Espera a que no haya peticiones de red en curso (500 ms en calma)." },
+});
+byName("browser_wait").description =
+  "Espera N segundos (max 10), o hasta que se cumplan las condiciones dadas (text, selector, urlContains, gone, idle; todas a la vez).";
+
+TOOLS.push(
+  {
+    name: "browser_query",
+    description: "Lista elementos que coinciden con un selector CSS (incluye iframes del mismo origen): ref, etiqueta, texto, si es visible y su posicion. Util para obtener refs sin recorrer todo el arbol.",
+    inputSchema: {
+      type: "object",
+      properties: { selector: { type: "string" }, limit: { type: "number" }, visibleOnly: { type: "boolean" }, ...tab },
+      required: ["selector"],
+    },
+  },
+  {
+    name: "browser_inspect",
+    description: "Detalle de un elemento (ref o selector): atributos, texto, valor, estado, posicion, si esta en pantalla, estilos clave y su HTML. Para depurar por que algo no responde.",
+    inputSchema: { type: "object", properties: { ref: { type: "string" }, ...sel, ...tab } },
+  },
+  {
+    name: "browser_drop_files",
+    description:
+      "Suelta archivos sobre una zona de arrastre (ref, selector o x,y) con eventos de arrastre reales. Para zonas 'arrastra aqui' que no tienen un input de archivo visible. Rutas bajo /workspace/.",
+    inputSchema: {
+      type: "object",
+      properties: { paths: { type: "array", items: { type: "string" } }, ref: { type: "string" }, x: { type: "number" }, y: { type: "number" }, ...sel, ...tab },
+      required: ["paths"],
+    },
+  },
+  {
+    name: "browser_batch",
+    description:
+      "Ejecuta varias herramientas seguidas en una sola llamada (max 20), p. ej. click + type + key + screenshot. Se detiene en el primer error salvo stopOnError=false. Cada accion es {tool, args}; no admite batch anidado.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        actions: {
+          type: "array",
+          items: { type: "object", properties: { tool: { type: "string" }, args: { type: "object" } }, required: ["tool"] },
+          maxItems: 20,
+        },
+        stopOnError: { type: "boolean" },
+      },
+      required: ["actions"],
+    },
+  },
+);
